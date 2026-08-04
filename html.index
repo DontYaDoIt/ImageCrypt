@@ -1,0 +1,86 @@
+  <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>PixelLock Image Encryptor</title>
+      <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+      <main class="app">
+        <header>
+          <div class="logo">🔒</div>
+          <div>
+            <h1>PixelLock</h1>
+            <p>Scramble and restore images directly in your browser.</p>
+          </div>
+        </header>
+
+        <section class="panel">
+          <label class="drop-zone" id="dropZone">
+            <input id="imageInput" type="file" accept="image/*" hidden />
+            <span class="drop-icon">🖼️</span>
+            <strong>Choose an image</strong>
+            <small>or drag and drop it here</small>
+          </label>
+
+          <div class="controls">
+            <label>
+              Password
+              <div class="password-row">
+                <input id="password" type="password" placeholder="Enter encryption password" autocomplete="off" />
+                <button id="showPassword" class="icon-button" type="button" aria-label="Show password">👁</button>
+              </div>
+            </label>
+
+            <label>
+              Scramble strength
+              <div class="range-row">
+                <input id="strength" type="range" min="1" max="8" value="4" />
+                <span id="strengthValue">4</span>
+              </div>
+            </label>
+
+            <div class="button-row">
+              <button id="encryptButton" class="primary" type="button" disabled>Lock Image</button>
+              <button id="decryptButton" type="button" disabled>Reverse Image</button>
+              <button id="resetButton" class="danger" type="button">Reset</button>
+            </div>
+
+            <p id="status" class="status">Select an image to begin.</p>
+          </div>
+        </section>
+
+        <section class="preview-grid">
+          <article class="preview-card">
+            <div class="card-heading">
+              <h2>Original</h2>
+              <span id="originalInfo"></span>
+            </div>
+            <div class="canvas-wrap">
+              <canvas id="sourceCanvas"></canvas>
+              <div class="empty-state" id="sourceEmpty">No image loaded</div>
+            </div>
+          </article>
+
+          <article class="preview-card">
+            <div class="card-heading">
+              <h2>Output</h2>
+              <button id="downloadButton" class="small-button" type="button" disabled>Download PNG</button>
+            </div>
+            <div class="canvas-wrap">
+              <canvas id="outputCanvas"></canvas>
+              <div class="empty-state" id="outputEmpty">Encrypted or restored image appears here</div>
+            </div>
+          </article>
+        </section>
+
+        <section class="notice">
+          <strong>Important:</strong>
+          Use the same password and strength value to reverse an image. Download encrypted images as PNG so pixel data is not changed by compression.
+        </section>
+      </main>
+
+      <script src="script.js"></script>
+    </body>
+    </html>
