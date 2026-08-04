@@ -1,86 +1,155 @@
-  <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>PixelLock Image Encryptor</title>
-      <link rel="stylesheet" href="style.css" />
-    </head>
-    <body>
-      <main class="app">
-        <header>
-          <div class="logo">🔒</div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="description"
+    content="PixelLock encrypts image pixels locally with AES-256-GCM."
+  />
+  <title>PixelLock Secure Image Encryption</title>
+
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='white'/%3E%3Cpath d='M20 28v-8c0-7 5-12 12-12s12 5 12 12v8h-6v-8c0-4-2-6-6-6s-6 2-6 6v8z' fill='black'/%3E%3Crect x='14' y='26' width='36' height='30' rx='7' fill='black'/%3E%3Ccircle cx='32' cy='40' r='4' fill='white'/%3E%3Crect x='30' y='40' width='4' height='8' rx='2' fill='white'/%3E%3C/svg%3E"
+  />
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div class="logo" aria-label="PixelLock black lock logo">
+        <svg viewBox="0 0 64 64" role="img" aria-hidden="true">
+          <path d="M20 28v-8c0-7 5-12 12-12s12 5 12 12v8h-6v-8c0-4-2-6-6-6s-6 2-6 6v8z" />
+          <rect x="14" y="26" width="36" height="30" rx="7" />
+          <circle class="keyhole" cx="32" cy="40" r="4" />
+          <rect class="keyhole" x="30" y="40" width="4" height="8" rx="2" />
+        </svg>
+      </div>
+
+      <div>
+        <h1>PixelLock</h1>
+        <p>AES-256 image encryption that stays inside your browser.</p>
+      </div>
+
+      <span class="local-badge">Local only</span>
+    </header>
+
+    <section class="panel">
+      <label class="drop-zone" id="dropZone">
+        <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden />
+        <span class="upload-icon">＋</span>
+        <strong>Choose an image</strong>
+        <small>or drag and drop it here</small>
+      </label>
+
+      <div class="controls">
+        <div class="security-label">
+          <span class="security-dot"></span>
+          <span>AES-256-GCM · PBKDF2-SHA-256 · 600,000 rounds</span>
+        </div>
+
+        <label class="field">
+          Password
+          <div class="password-row">
+            <input
+              id="password"
+              type="password"
+              placeholder="Use at least 12 characters"
+              autocomplete="new-password"
+              spellcheck="false"
+            />
+            <button id="showPassword" class="icon-button" type="button" aria-label="Show password">
+              Show
+            </button>
+          </div>
+        </label>
+
+        <label class="field">
+          Confirm password
+          <input
+            id="confirmPassword"
+            type="password"
+            placeholder="Required when locking"
+            autocomplete="new-password"
+            spellcheck="false"
+          />
+        </label>
+
+        <div class="password-meter" aria-live="polite">
+          <div class="meter-track">
+            <div id="meterFill" class="meter-fill"></div>
+          </div>
+          <span id="passwordHint">Use a long, unique password.</span>
+        </div>
+
+        <div class="button-row">
+          <button id="encryptButton" class="primary" type="button" disabled>
+            Lock Image
+          </button>
+          <button id="decryptButton" type="button" disabled>
+            Reverse Image
+          </button>
+          <button id="resetButton" class="danger" type="button">
+            Reset
+          </button>
+        </div>
+
+        <p id="status" class="status">Select an image to begin.</p>
+      </div>
+    </section>
+
+    <section class="preview-grid">
+      <article class="preview-card">
+        <div class="card-heading">
           <div>
-            <h1>PixelLock</h1>
-            <p>Scramble and restore images directly in your browser.</p>
+            <h2>Loaded image</h2>
+            <span id="originalInfo">Nothing selected</span>
           </div>
-        </header>
+          <span id="sourceType" class="type-badge">—</span>
+        </div>
 
-        <section class="panel">
-          <label class="drop-zone" id="dropZone">
-            <input id="imageInput" type="file" accept="image/*" hidden />
-            <span class="drop-icon">🖼️</span>
-            <strong>Choose an image</strong>
-            <small>or drag and drop it here</small>
-          </label>
+        <div class="canvas-wrap">
+          <canvas id="sourceCanvas"></canvas>
+          <div class="empty-state" id="sourceEmpty">No image loaded</div>
+        </div>
+      </article>
 
-          <div class="controls">
-            <label>
-              Password
-              <div class="password-row">
-                <input id="password" type="password" placeholder="Enter encryption password" autocomplete="off" />
-                <button id="showPassword" class="icon-button" type="button" aria-label="Show password">👁</button>
-              </div>
-            </label>
-
-            <label>
-              Scramble strength
-              <div class="range-row">
-                <input id="strength" type="range" min="1" max="8" value="4" />
-                <span id="strengthValue">4</span>
-              </div>
-            </label>
-
-            <div class="button-row">
-              <button id="encryptButton" class="primary" type="button" disabled>Lock Image</button>
-              <button id="decryptButton" type="button" disabled>Reverse Image</button>
-              <button id="resetButton" class="danger" type="button">Reset</button>
-            </div>
-
-            <p id="status" class="status">Select an image to begin.</p>
+      <article class="preview-card">
+        <div class="card-heading">
+          <div>
+            <h2>Output</h2>
+            <span id="outputInfo">Nothing generated</span>
           </div>
-        </section>
 
-        <section class="preview-grid">
-          <article class="preview-card">
-            <div class="card-heading">
-              <h2>Original</h2>
-              <span id="originalInfo"></span>
-            </div>
-            <div class="canvas-wrap">
-              <canvas id="sourceCanvas"></canvas>
-              <div class="empty-state" id="sourceEmpty">No image loaded</div>
-            </div>
-          </article>
+          <button id="downloadButton" class="small-button" type="button" disabled>
+            Save PNG
+          </button>
+        </div>
 
-          <article class="preview-card">
-            <div class="card-heading">
-              <h2>Output</h2>
-              <button id="downloadButton" class="small-button" type="button" disabled>Download PNG</button>
-            </div>
-            <div class="canvas-wrap">
-              <canvas id="outputCanvas"></canvas>
-              <div class="empty-state" id="outputEmpty">Encrypted or restored image appears here</div>
-            </div>
-          </article>
-        </section>
+        <div class="canvas-wrap">
+          <canvas id="outputCanvas"></canvas>
+          <div class="empty-state" id="outputEmpty">
+            Locked or restored image appears here
+          </div>
+        </div>
+      </article>
+    </section>
 
-        <section class="notice">
-          <strong>Important:</strong>
-          Use the same password and strength value to reverse an image. Download encrypted images as PNG so pixel data is not changed by compression.
-        </section>
-      </main>
+    <section class="notice-grid">
+      <article class="notice">
+        <strong>Keep the password.</strong>
+        There is no password recovery. A long, unique password is what protects the image.
+      </article>
 
-      <script src="script.js"></script>
-    </body>
-    </html>
+      <article class="notice warning">
+        <strong>Send it as a file.</strong>
+        Resizing, editing, screenshotting, or photo compression changes the encrypted pixels and makes reversal fail.
+      </article>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
