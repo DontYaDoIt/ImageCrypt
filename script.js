@@ -1,9 +1,10 @@
 const imageInput = document.getElementById("imageInput");
 const dropZone = document.getElementById("dropZone");
 const passwordInput = document.getElementById("password");
+const confirmPasswordInput = document.getElementById("confirmPassword");
 const showPasswordButton = document.getElementById("showPassword");
-const strengthInput = document.getElementById("strength");
-const strengthValue = document.getElementById("strengthValue");
+const meterFill = document.getElementById("meterFill");
+const passwordHint = document.getElementById("passwordHint");
 const encryptButton = document.getElementById("encryptButton");
 const decryptButton = document.getElementById("decryptButton");
 const resetButton = document.getElementById("resetButton");
@@ -14,250 +15,614 @@ const outputCanvas = document.getElementById("outputCanvas");
 const sourceEmpty = document.getElementById("sourceEmpty");
 const outputEmpty = document.getElementById("outputEmpty");
 const originalInfo = document.getElementById("originalInfo");
+const outputInfo = document.getElementById("outputInfo");
+const sourceType = document.getElementById("sourceType");
 
-const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
-const outputContext = outputCanvas.getContext("2d", { willReadFrequently: true });
+const sourceContext = sourceCanvas.getContext("2d", {
+  willReadFrequently: true
+});
+const outputContext = outputCanvas.getContext("2d", {
+  willReadFrequently: true
+});
+
+const textEncoder = new TextEncoder();
+
+const MAGIC = textEncoder.encode("PXLKPNG2");
+const VERSION = 2;
+const KDF_ID_PBKDF2_SHA256 = 1;
+const CIPHER_ID_AES_256_GCM = 1;
+const PBKDF2_ITERATIONS = 600000;
+const SALT_LENGTH = 16;
+const IV_LENGTH = 12;
+const GCM_TAG_BYTES = 16;
+const HEADER_SIZE = 60;
+const MIN_PASSWORD_LENGTH = 12;
+const MAX_PIXEL_COUNT = 20000000;
 
 let loadedFileName = "image";
 let hasImage = false;
 let hasOutput = false;
+let isBusy = false;
+let loadedImageIsLocked = false;
+let outputMode = "";
 
 function setStatus(message, type = "") {
   statusText.textContent = message;
   statusText.className = `status ${type}`.trim();
 }
 
-function updateButtons() {
-  const ready = hasImage && passwordInput.value.length > 0;
-  encryptButton.disabled = !ready;
-  decryptButton.disabled = !ready;
-  downloadButton.disabled = !hasOutput;
+function nextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
 }
 
-function hashPassword(password, strength, width, height) {
-  let hash = 2166136261 >>> 0;
-  const text = `${password}|${strength}|${width}x${height}`;
+function setBusy(busy) {
+  isBusy = busy;
+  imageInput.disabled = busy;
+  passwordInput.disabled = busy;
+  confirmPasswordInput.disabled = busy;
+  resetButton.disabled = busy;
+  showPasswordButton.disabled = busy;
+  updateButtons();
+}
 
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+function updateButtons() {
+  const hasPassword = passwordInput.value.length > 0;
+  const canUseImage = hasImage && hasPassword && !isBusy;
+
+  encryptButton.disabled = !canUseImage;
+  decryptButton.disabled = !canUseImage;
+  downloadButton.disabled = !hasOutput || isBusy;
+}
+
+function updatePasswordMeter() {
+  const password = passwordInput.value;
+  let score = 0;
+
+  if (password.length >= 12) score += 1;
+  if (password.length >= 16) score += 1;
+  if (/[a-z]/.test(password) && /[A-Z]/.test(password)) score += 1;
+  if (/\d/.test(password)) score += 1;
+  if (/[^A-Za-z0-9]/.test(password)) score += 1;
+
+  const widths = ["0%", "20%", "40%", "60%", "80%", "100%"];
+  const labels = [
+    "Use a long, unique password.",
+    "Very weak",
+    "Weak",
+    "Fair",
+    "Strong",
+    "Very strong"
+  ];
+  const colors = [
+    "#596170",
+    "#e05b5b",
+    "#df814e",
+    "#d8b64d",
+    "#69c987",
+    "#55df92"
+  ];
+
+  meterFill.style.width = widths[score];
+  meterFill.style.background = colors[score];
+  passwordHint.textContent = labels[score];
+}
+
+function bytesEqual(first, second) {
+  if (first.length !== second.length) return false;
+
+  for (let index = 0; index < first.length; index += 1) {
+    if (first[index] !== second[index]) return false;
   }
 
-  return hash >>> 0;
+  return true;
 }
 
-function createRandom(seed) {
-  let state = seed >>> 0;
+function fillSecureRandom(target) {
+  const maximumChunk = 65536;
 
-  return function random() {
-    state += 0x6d2b79f5;
-    let value = state;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  for (let offset = 0; offset < target.length; offset += maximumChunk) {
+    crypto.getRandomValues(
+      target.subarray(offset, Math.min(offset + maximumChunk, target.length))
+    );
+  }
+
+  return target;
+}
+
+async function deriveEncryptionKey(password, salt, iterations, usages) {
+  const passwordMaterial = await crypto.subtle.importKey(
+    "raw",
+    textEncoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt,
+      iterations
+    },
+    passwordMaterial,
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    false,
+    usages
+  );
+}
+
+function createHeader({
+  iterations,
+  width,
+  height,
+  plainLength,
+  cipherLength,
+  salt,
+  iv
+}) {
+  const header = new Uint8Array(HEADER_SIZE);
+  const view = new DataView(header.buffer);
+
+  header.set(MAGIC, 0);
+  header[8] = VERSION;
+  header[9] = KDF_ID_PBKDF2_SHA256;
+  header[10] = CIPHER_ID_AES_256_GCM;
+  header[11] = 0;
+
+  view.setUint32(12, iterations, false);
+  view.setUint32(16, width, false);
+  view.setUint32(20, height, false);
+  view.setUint32(24, plainLength, false);
+  view.setUint32(28, cipherLength, false);
+
+  header.set(salt, 32);
+  header.set(iv, 48);
+
+  return header;
+}
+
+function readHeader(header) {
+  if (header.length < HEADER_SIZE) {
+    throw new Error("This image is too small to be a PixelLock file.");
+  }
+
+  if (!bytesEqual(header.subarray(0, MAGIC.length), MAGIC)) {
+    throw new Error("This is not a PixelLock encrypted PNG.");
+  }
+
+  const view = new DataView(
+    header.buffer,
+    header.byteOffset,
+    header.byteLength
+  );
+
+  const version = header[8];
+  const kdfId = header[9];
+  const cipherId = header[10];
+  const iterations = view.getUint32(12, false);
+  const width = view.getUint32(16, false);
+  const height = view.getUint32(20, false);
+  const plainLength = view.getUint32(24, false);
+  const cipherLength = view.getUint32(28, false);
+  const salt = header.slice(32, 48);
+  const iv = header.slice(48, 60);
+
+  if (version !== VERSION) {
+    throw new Error(`Unsupported PixelLock version: ${version}.`);
+  }
+
+  if (
+    kdfId !== KDF_ID_PBKDF2_SHA256 ||
+    cipherId !== CIPHER_ID_AES_256_GCM
+  ) {
+    throw new Error("Unsupported PixelLock encryption method.");
+  }
+
+  if (iterations < 100000 || iterations > 5000000) {
+    throw new Error("The encrypted file contains invalid key settings.");
+  }
+
+  if (
+    width < 1 ||
+    height < 1 ||
+    width * height > MAX_PIXEL_COUNT ||
+    plainLength !== width * height * 4 ||
+    cipherLength !== plainLength + GCM_TAG_BYTES
+  ) {
+    throw new Error("The encrypted image metadata is invalid.");
+  }
+
+  return {
+    version,
+    iterations,
+    width,
+    height,
+    plainLength,
+    cipherLength,
+    salt,
+    iv
   };
 }
 
-function buildPermutation(length, random) {
-  const permutation = new Uint32Array(length);
+function extractRgbBytes(imageData, requestedLength) {
+  const availableLength = Math.floor(imageData.data.length / 4) * 3;
 
-  for (let index = 0; index < length; index += 1) {
-    permutation[index] = index;
+  if (requestedLength > availableLength) {
+    throw new Error("The encrypted PNG is incomplete or damaged.");
   }
 
-  for (let index = length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(random() * (index + 1));
-    const temporary = permutation[index];
-    permutation[index] = permutation[swapIndex];
-    permutation[swapIndex] = temporary;
+  const result = new Uint8Array(requestedLength);
+  let outputOffset = 0;
+
+  for (
+    let inputOffset = 0;
+    inputOffset < imageData.data.length && outputOffset < requestedLength;
+    inputOffset += 4
+  ) {
+    result[outputOffset++] = imageData.data[inputOffset];
+
+    if (outputOffset < requestedLength) {
+      result[outputOffset++] = imageData.data[inputOffset + 1];
+    }
+
+    if (outputOffset < requestedLength) {
+      result[outputOffset++] = imageData.data[inputOffset + 2];
+    }
   }
 
-  return permutation;
+  return result;
 }
 
-function transformImage(mode) {
+function appearsToBeLockedImage() {
+  if (!hasImage) return false;
+
+  const neededPixels = Math.ceil(MAGIC.length / 3);
+  const imageData = sourceContext.getImageData(0, 0, neededPixels, 1);
+  const bytes = extractRgbBytes(imageData, MAGIC.length);
+
+  return bytesEqual(bytes, MAGIC);
+}
+
+function calculateCarrierDimensions(byteLength, originalWidth, originalHeight) {
+  const pixelCount = Math.ceil(byteLength / 3);
+  const originalAspect = originalWidth / originalHeight;
+  const safeAspect = Math.max(0.3, Math.min(3.5, originalAspect));
+
+  let width = Math.ceil(Math.sqrt(pixelCount * safeAspect));
+  let height = Math.ceil(pixelCount / width);
+
+  while (width * height * 3 < byteLength) {
+    height += 1;
+  }
+
+  return { width, height };
+}
+
+function writePayloadToCarrier(payload, width, height) {
+  const carrier = outputContext.createImageData(width, height);
+  const randomRgb = fillSecureRandom(new Uint8Array(width * height * 3));
+
+  let rgbOffset = 0;
+
+  for (let pixelOffset = 0; pixelOffset < carrier.data.length; pixelOffset += 4) {
+    carrier.data[pixelOffset] = randomRgb[rgbOffset++];
+    carrier.data[pixelOffset + 1] = randomRgb[rgbOffset++];
+    carrier.data[pixelOffset + 2] = randomRgb[rgbOffset++];
+    carrier.data[pixelOffset + 3] = 255;
+  }
+
+  let payloadOffset = 0;
+
+  for (
+    let pixelOffset = 0;
+    pixelOffset < carrier.data.length && payloadOffset < payload.length;
+    pixelOffset += 4
+  ) {
+    carrier.data[pixelOffset] = payload[payloadOffset++];
+
+    if (payloadOffset < payload.length) {
+      carrier.data[pixelOffset + 1] = payload[payloadOffset++];
+    }
+
+    if (payloadOffset < payload.length) {
+      carrier.data[pixelOffset + 2] = payload[payloadOffset++];
+    }
+  }
+
+  outputCanvas.width = width;
+  outputCanvas.height = height;
+  outputContext.putImageData(carrier, 0, 0);
+}
+
+async function lockImage() {
   if (!hasImage) {
     setStatus("Choose an image first.", "error");
+    return;
+  }
+
+  if (!crypto?.subtle) {
+    setStatus(
+      "Web Crypto is unavailable. Open this page through HTTPS or localhost.",
+      "error"
+    );
+    return;
+  }
+
+  const password = passwordInput.value;
+  const confirmation = confirmPasswordInput.value;
+
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    setStatus(
+      `Use at least ${MIN_PASSWORD_LENGTH} characters for the password.`,
+      "error"
+    );
+    return;
+  }
+
+  if (password !== confirmation) {
+    setStatus("The password confirmation does not match.", "error");
+    return;
+  }
+
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
+  const pixelCount = width * height;
+
+  if (pixelCount > MAX_PIXEL_COUNT) {
+    setStatus(
+      "This image is too large for safe in-browser processing. Use a smaller image.",
+      "error"
+    );
+    return;
+  }
+
+  setBusy(true);
+  setStatus("Creating a random salt and deriving the encryption key…", "working");
+  await nextPaint();
+
+  try {
+    const imageData = sourceContext.getImageData(0, 0, width, height);
+    const plainPixels = new Uint8Array(imageData.data);
+    const salt = fillSecureRandom(new Uint8Array(SALT_LENGTH));
+    const iv = fillSecureRandom(new Uint8Array(IV_LENGTH));
+    const cipherLength = plainPixels.length + GCM_TAG_BYTES;
+
+    const header = createHeader({
+      iterations: PBKDF2_ITERATIONS,
+      width,
+      height,
+      plainLength: plainPixels.length,
+      cipherLength,
+      salt,
+      iv
+    });
+
+    const key = await deriveEncryptionKey(
+      password,
+      salt,
+      PBKDF2_ITERATIONS,
+      ["encrypt"]
+    );
+
+    setStatus("Encrypting every pixel with AES-256-GCM…", "working");
+    await nextPaint();
+
+    const encryptedBuffer = await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: header,
+        tagLength: 128
+      },
+      key,
+      plainPixels
+    );
+
+    const encrypted = new Uint8Array(encryptedBuffer);
+    const payload = new Uint8Array(header.length + encrypted.length);
+    payload.set(header, 0);
+    payload.set(encrypted, header.length);
+
+    const carrierSize = calculateCarrierDimensions(
+      payload.length,
+      width,
+      height
+    );
+
+    writePayloadToCarrier(payload, carrierSize.width, carrierSize.height);
+
+    outputCanvas.style.display = "block";
+    outputEmpty.style.display = "none";
+    outputInfo.textContent =
+      `${carrierSize.width} × ${carrierSize.height} encrypted carrier`;
+    outputMode = "encrypted";
+    hasOutput = true;
+
+    setStatus(
+      "Image locked successfully. Save the PNG and keep the password.",
+      "success"
+    );
+  } catch (error) {
+    console.error(error);
+    setStatus(
+      "Encryption failed. The image may be too large for this browser.",
+      "error"
+    );
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function reverseImage() {
+  if (!hasImage) {
+    setStatus("Choose an encrypted PixelLock PNG first.", "error");
+    return;
+  }
+
+  if (!crypto?.subtle) {
+    setStatus(
+      "Web Crypto is unavailable. Open this page through HTTPS or localhost.",
+      "error"
+    );
+    return;
+  }
+
+  if (!loadedImageIsLocked) {
+    setStatus("The loaded image is not a PixelLock encrypted PNG.", "error");
     return;
   }
 
   const password = passwordInput.value;
 
   if (!password) {
-    setStatus("Enter a password.", "error");
+    setStatus("Enter the encryption password.", "error");
     return;
   }
 
-  const width = sourceCanvas.width;
-  const height = sourceCanvas.height;
-  const strength = Number(strengthInput.value);
-  const original = sourceContext.getImageData(0, 0, width, height);
-  const result = outputContext.createImageData(width, height);
-  const pixelCount = width * height;
-  const random = createRandom(hashPassword(password, strength, width, height));
-  const permutation = buildPermutation(pixelCount, random);
-
-  const xorBytes = new Uint8Array(pixelCount * 3);
-  for (let index = 0; index < xorBytes.length; index += 1) {
-    xorBytes[index] = Math.floor(random() * 256);
-  }
-
-  const rounds = strength;
-
-  if (mode === "encrypt") {
-    let working = new Uint8ClampedArray(original.data);
-
-    for (let round = 0; round < rounds; round += 1) {
-      const shuffled = new Uint8ClampedArray(working.length);
-
-      for (let pixel = 0; pixel < pixelCount; pixel += 1) {
-        const destination = permutation[pixel];
-        const sourceOffset = pixel * 4;
-        const destinationOffset = destination * 4;
-        const keyOffset = pixel * 3;
-
-        shuffled[destinationOffset] = working[sourceOffset] ^ xorBytes[keyOffset];
-        shuffled[destinationOffset + 1] = working[sourceOffset + 1] ^ xorBytes[keyOffset + 1];
-        shuffled[destinationOffset + 2] = working[sourceOffset + 2] ^ xorBytes[keyOffset + 2];
-        shuffled[destinationOffset + 3] = working[sourceOffset + 3];
-      }
-
-      working = shuffled;
-    }
-
-    result.data.set(working);
-    setStatus("Image locked. Download it as PNG.", "success");
-  } else {
-    let working = new Uint8ClampedArray(original.data);
-
-    for (let round = 0; round < rounds; round += 1) {
-      const restored = new Uint8ClampedArray(working.length);
-
-      for (let pixel = 0; pixel < pixelCount; pixel += 1) {
-        const encryptedPixel = permutation[pixel];
-        const sourceOffset = encryptedPixel * 4;
-        const destinationOffset = pixel * 4;
-        const keyOffset = pixel * 3;
-
-        restored[destinationOffset] = working[sourceOffset] ^ xorBytes[keyOffset];
-        restored[destinationOffset + 1] = working[sourceOffset + 1] ^ xorBytes[keyOffset + 1];
-        restored[destinationOffset + 2] = working[sourceOffset + 2] ^ xorBytes[keyOffset + 2];
-        restored[destinationOffset + 3] = working[sourceOffset + 3];
-      }
-
-      working = restored;
-    }
-
-    result.data.set(working);
-    setStatus("Reverse completed. A wrong password produces scrambled pixels.", "success");
-  }
-
-  outputCanvas.width = width;
-  outputCanvas.height = height;
-  outputContext.putImageData(result, 0, 0);
-  outputCanvas.style.display = "block";
-  outputEmpty.style.display = "none";
-  hasOutput = true;
-  updateButtons();
-}
-
-function loadImage(file) {
-  if (!file || !file.type.startsWith("image/")) {
-    setStatus("Please choose a valid image file.", "error");
-    return;
-  }
-
-  const reader = new FileReader();
-
-  reader.onerror = () => setStatus("The image could not be read.", "error");
-
-  reader.onload = () => {
-    const image = new Image();
-
-    image.onerror = () => setStatus("The selected file is not a readable image.", "error");
-
-    image.onload = () => {
-      sourceCanvas.width = image.naturalWidth;
-      sourceCanvas.height = image.naturalHeight;
-      sourceContext.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
-      sourceContext.drawImage(image, 0, 0);
-
-      sourceCanvas.style.display = "block";
-      sourceEmpty.style.display = "none";
-      outputCanvas.style.display = "none";
-      outputEmpty.style.display = "block";
-
-      loadedFileName = file.name.replace(/\.[^.]+$/, "") || "image";
-      originalInfo.textContent = `${image.naturalWidth} × ${image.naturalHeight}`;
-      hasImage = true;
-      hasOutput = false;
-
-      setStatus("Image loaded. Enter a password, then lock or reverse it.", "success");
-      updateButtons();
-    };
-
-    image.src = reader.result;
-  };
-
-  reader.readAsDataURL(file);
-}
-
-imageInput.addEventListener("change", () => loadImage(imageInput.files[0]));
-
-passwordInput.addEventListener("input", updateButtons);
-
-showPasswordButton.addEventListener("click", () => {
-  const showing = passwordInput.type === "text";
-  passwordInput.type = showing ? "password" : "text";
-  showPasswordButton.textContent = showing ? "👁" : "🙈";
-});
-
-strengthInput.addEventListener("input", () => {
-  strengthValue.textContent = strengthInput.value;
-});
-
-encryptButton.addEventListener("click", () => transformImage("encrypt"));
-decryptButton.addEventListener("click", () => transformImage("decrypt"));
-
-downloadButton.addEventListener("click", async () => {
-  if (!hasOutput) {
-    setStatus("Create an output image before downloading.", "error");
-    return;
-  }
-
-  downloadButton.disabled = true;
-  setStatus("Preparing PNG...");
+  setBusy(true);
+  setStatus("Reading and validating the encrypted image…", "working");
+  await nextPaint();
 
   try {
-    const blob = await new Promise((resolve, reject) => {
-      outputCanvas.toBlob((result) => {
-        if (result) {
-          resolve(result);
-        } else {
-          reject(new Error("The browser could not create the PNG."));
-        }
-      }, "image/png");
-    });
+    const carrierData = sourceContext.getImageData(
+      0,
+      0,
+      sourceCanvas.width,
+      sourceCanvas.height
+    );
 
-    const fileName = `${loadedFileName}-pixellock.png`;
+    const header = extractRgbBytes(carrierData, HEADER_SIZE);
+    const metadata = readHeader(header);
+    const totalPayloadLength = HEADER_SIZE + metadata.cipherLength;
+    const payload = extractRgbBytes(carrierData, totalPayloadLength);
+    const ciphertext = payload.slice(HEADER_SIZE);
+
+    setStatus("Deriving the password key and authenticating the image…", "working");
+    await nextPaint();
+
+    const key = await deriveEncryptionKey(
+      password,
+      metadata.salt,
+      metadata.iterations,
+      ["decrypt"]
+    );
+
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: metadata.iv,
+        additionalData: header,
+        tagLength: 128
+      },
+      key,
+      ciphertext
+    );
+
+    const restoredPixels = new Uint8ClampedArray(decryptedBuffer);
+
+    if (restoredPixels.length !== metadata.plainLength) {
+      throw new Error("The decrypted pixel length is invalid.");
+    }
+
+    outputCanvas.width = metadata.width;
+    outputCanvas.height = metadata.height;
+
+    const restoredImage = new ImageData(
+      restoredPixels,
+      metadata.width,
+      metadata.height
+    );
+
+    outputContext.putImageData(restoredImage, 0, 0);
+    outputCanvas.style.display = "block";
+    outputEmpty.style.display = "none";
+    outputInfo.textContent =
+      `${metadata.width} × ${metadata.height} authenticated restoration`;
+    outputMode = "restored";
+    hasOutput = true;
+
+    setStatus("Password accepted. The original pixels were restored.", "success");
+  } catch (error) {
+    console.error(error);
+
+    if (error?.name === "OperationError") {
+      setStatus(
+        "Wrong password, damaged PNG, or modified encrypted pixels.",
+        "error"
+      );
+    } else {
+      setStatus(error?.message || "The encrypted image could not be reversed.", "error");
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("The browser could not create the PNG."));
+      }
+    }, "image/png");
+  });
+}
+
+async function saveOutput() {
+  if (!hasOutput) {
+    setStatus("Create an output image before saving.", "error");
+    return;
+  }
+
+  setBusy(true);
+  setStatus("Preparing the PNG…", "working");
+
+  try {
+    const blob = await canvasToBlob(outputCanvas);
+    const baseName = loadedFileName
+      .replace(/\.[^.]+$/, "")
+      .replace(/-locked$/i, "")
+      .replace(/-restored$/i, "");
+
+    const fileName =
+      outputMode === "encrypted"
+        ? `${baseName}-locked.png`
+        : `${baseName}-restored.png`;
+
     const file = new File([blob], fileName, { type: "image/png" });
 
-    // iPhone/iPad browsers work more reliably through the native share sheet.
-    if (
-      navigator.share &&
-      navigator.canShare &&
-      navigator.canShare({ files: [file] })
-    ) {
+    let canNativeShare = false;
+
+    try {
+      canNativeShare =
+        Boolean(navigator.share) &&
+        Boolean(navigator.canShare) &&
+        navigator.canShare({ files: [file] });
+    } catch {
+      canNativeShare = false;
+    }
+
+    if (canNativeShare) {
       await navigator.share({
         files: [file],
         title: "PixelLock Image"
       });
 
-      setStatus("PNG opened in the share sheet. Choose Save Image or Save to Files.", "success");
+      setStatus(
+        "PNG opened in the share sheet. Choose Save Image or Save to Files.",
+        "success"
+      );
       return;
     }
 
-    // Standard desktop and Android browser download.
     const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = blobUrl;
@@ -267,24 +632,28 @@ downloadButton.addEventListener("click", async () => {
     link.click();
     link.remove();
 
-    // Keep the URL alive briefly because Safari may process the click later.
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
     setStatus("PNG download started.", "success");
   } catch (error) {
-    if (error && error.name === "AbortError") {
+    if (error?.name === "AbortError") {
       setStatus("Save was canceled.");
     } else {
       console.error(error);
 
-      // Last fallback: open the PNG so it can be held/saved manually.
       try {
         const fallbackUrl = outputCanvas.toDataURL("image/png");
-        const openedWindow = window.open(fallbackUrl, "_blank");
+        const opened = window.open(fallbackUrl, "_blank");
 
-        if (openedWindow) {
-          setStatus("The PNG opened in a new tab. Hold the image to save it.", "success");
+        if (opened) {
+          setStatus(
+            "The PNG opened in a new tab. Hold or right-click it to save.",
+            "success"
+          );
         } else {
-          setStatus("The browser blocked the save window. Allow pop-ups and try again.", "error");
+          setStatus(
+            "The browser blocked the save window. Allow pop-ups and retry.",
+            "error"
+          );
         }
       } catch (fallbackError) {
         console.error(fallbackError);
@@ -292,25 +661,131 @@ downloadButton.addEventListener("click", async () => {
       }
     }
   } finally {
-    downloadButton.disabled = !hasOutput;
+    setBusy(false);
   }
-});
+}
 
-resetButton.addEventListener("click", () => {
+function clearOutput() {
+  outputContext.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+  outputCanvas.width = 0;
+  outputCanvas.height = 0;
+  outputCanvas.style.display = "none";
+  outputEmpty.style.display = "block";
+  outputInfo.textContent = "Nothing generated";
+  outputMode = "";
+  hasOutput = false;
+}
+
+function loadImage(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    setStatus("Choose a valid image file.", "error");
+    return;
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+
+  image.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    setStatus("The selected file is not a readable image.", "error");
+  };
+
+  image.onload = () => {
+    URL.revokeObjectURL(objectUrl);
+
+    const pixelCount = image.naturalWidth * image.naturalHeight;
+
+    if (pixelCount > MAX_PIXEL_COUNT) {
+      setStatus(
+        "This image is too large for safe in-browser processing.",
+        "error"
+      );
+      return;
+    }
+
+    sourceCanvas.width = image.naturalWidth;
+    sourceCanvas.height = image.naturalHeight;
+    sourceContext.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+    sourceContext.drawImage(image, 0, 0);
+
+    sourceCanvas.style.display = "block";
+    sourceEmpty.style.display = "none";
+
+    loadedFileName = file.name || "image";
+    hasImage = true;
+    loadedImageIsLocked = appearsToBeLockedImage();
+
+    originalInfo.textContent =
+      `${image.naturalWidth} × ${image.naturalHeight} · ` +
+      `${(file.size / 1024 / 1024).toFixed(2)} MB`;
+
+    sourceType.textContent = loadedImageIsLocked
+      ? "PixelLock encrypted"
+      : "Normal image";
+
+    clearOutput();
+
+    setStatus(
+      loadedImageIsLocked
+        ? "Encrypted PixelLock PNG detected. Enter the password and press Reverse Image."
+        : "Normal image loaded. Enter and confirm a strong password to lock it.",
+      "success"
+    );
+
+    updateButtons();
+  };
+
+  image.src = objectUrl;
+}
+
+function resetApp() {
   imageInput.value = "";
   passwordInput.value = "";
+  confirmPasswordInput.value = "";
+
   sourceContext.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
-  outputContext.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+  sourceCanvas.width = 0;
+  sourceCanvas.height = 0;
   sourceCanvas.style.display = "none";
-  outputCanvas.style.display = "none";
   sourceEmpty.style.display = "block";
-  outputEmpty.style.display = "block";
-  originalInfo.textContent = "";
+
+  originalInfo.textContent = "Nothing selected";
+  sourceType.textContent = "—";
+
   hasImage = false;
-  hasOutput = false;
+  loadedImageIsLocked = false;
+  loadedFileName = "image";
+
+  clearOutput();
+  updatePasswordMeter();
   setStatus("Select an image to begin.");
   updateButtons();
+}
+
+imageInput.addEventListener("change", () => {
+  loadImage(imageInput.files[0]);
 });
+
+passwordInput.addEventListener("input", () => {
+  updatePasswordMeter();
+  updateButtons();
+});
+
+confirmPasswordInput.addEventListener("input", updateButtons);
+
+showPasswordButton.addEventListener("click", () => {
+  const show = passwordInput.type === "password";
+  const nextType = show ? "text" : "password";
+
+  passwordInput.type = nextType;
+  confirmPasswordInput.type = nextType;
+  showPasswordButton.textContent = show ? "Hide" : "Show";
+});
+
+encryptButton.addEventListener("click", lockImage);
+decryptButton.addEventListener("click", reverseImage);
+downloadButton.addEventListener("click", saveOutput);
+resetButton.addEventListener("click", resetApp);
 
 ["dragenter", "dragover"].forEach((eventName) => {
   dropZone.addEventListener(eventName, (event) => {
@@ -329,3 +804,18 @@ resetButton.addEventListener("click", () => {
 dropZone.addEventListener("drop", (event) => {
   loadImage(event.dataTransfer.files[0]);
 });
+
+window.addEventListener("beforeunload", () => {
+  passwordInput.value = "";
+  confirmPasswordInput.value = "";
+});
+
+if (!window.crypto?.subtle) {
+  setStatus(
+    "Web Crypto is unavailable. Run this page through HTTPS or localhost.",
+    "error"
+  );
+}
+
+updatePasswordMeter();
+updateButtons();
